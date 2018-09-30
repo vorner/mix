@@ -39,6 +39,8 @@ crate struct Cfg {
     #[serde(default = "default_socket")]
     crate socket: PathBuf,
     crate storage: Storage,
+    #[serde(default)]
+    crate scripts: Vec<PathBuf>,
 }
 
 crate fn load() -> Result<Cfg, Error> {

@@ -1,14 +1,15 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use failure::Error;
+use failure::{Error, ResultExt};
 use flate2::read::GzDecoder;
 use lazy_static::lazy_static;
 use log::{debug, error, info, trace};
 use parking_lot::Mutex;
+use rlua::{Lua, Function, UserData, UserDataMethods, Table};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::config::Cfg;
@@ -21,7 +22,9 @@ const GZIP_MAGIC: &[u8] = &[0x1F, 0x8B];
 const MBOX_MAGIC: &[u8] = b"From ";
 const MDIR_SUBDIRS: &[&str] = &["cur", "new", "tmp"];
 
-#[derive(Debug)]
+const CONFIG_CBACKS: &str = "config-cbacks";
+
+#[derive(Clone, Debug)]
 enum MboxType {
     Plain,
     Gzip,
@@ -68,11 +71,13 @@ impl MboxType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 crate struct Mailbox {
     path: PathBuf,
     name: String,
     tp: MboxType,
+    prio: usize,
+    shortcut: Option<char>,
 }
 
 impl Mailbox {
@@ -87,6 +92,8 @@ impl Mailbox {
                 path: entry.path().to_owned(),
                 name,
                 tp: mt,
+                prio: 0,
+                shortcut: None,
             }))
         } else {
             Ok(None)
@@ -94,6 +101,25 @@ impl Mailbox {
     }
     crate fn name(&self) -> &str {
         &self.name
+    }
+}
+
+impl UserData for Mailbox {
+    fn add_methods(methods: &mut UserDataMethods<Self>) {
+        methods.add_method("name", |_, this, ()| Ok(this.name().to_owned()));
+        methods.add_method("path", |_, this, ()| Ok(this.path.to_string_lossy().into_owned()));
+        methods.add_method_mut("set_name", |_, this, name| {
+            this.name = name;
+            Ok(())
+        });
+        methods.add_method_mut("set_prio", |_, this, prio| {
+            this.prio = prio;
+            Ok(())
+        });
+        methods.add_method_mut("set_shortcut", |_, this, sc: String| {
+            this.shortcut = sc.chars().nth(0);
+            Ok(())
+        });
     }
 }
 
@@ -123,8 +149,48 @@ fn scan_cutoff(dedup: &HashSet<PathBuf>, entry: &DirEntry) -> bool {
     }
 }
 
-crate fn initial_scan(cfg: &Cfg) {
+fn lua_load<P: AsRef<Path>>(lua: &Lua, script: P) -> Result<(), Error> {
+    debug!("Running lua script from {}", script.as_ref().display());
+    let mut f = File::open(&script)?;
+    // TODO: Once lua supports non-utf8 stuff, use Vec<u8>
+    let mut code = String::new();
+    f.read_to_string(&mut code)?;
+    lua.exec(&code, Some(&script.as_ref().to_string_lossy())).map_err(Error::from)
+}
+
+fn configure_mbox(lua: &Lua, mbox: Mailbox) -> Result<Mailbox, Error> {
+    let cbacks = lua.named_registry_value::<Table>(CONFIG_CBACKS)?;
+    let handle = lua.create_userdata(mbox)?;
+
+    for cback in cbacks.sequence_values::<Function>() {
+        let cback = cback?;
+        cback.call(handle.clone())?;
+    }
+
+    let result = handle.borrow::<Mailbox>()?.clone();
+    Ok(result)
+}
+
+crate fn initial_scan(cfg: &Cfg) -> Result<(), Error> {
+    let lua = Lua::new();
+
+    trace!("Preparing configuration lua instance");
+    // Set up functions the scripts can call
+    lua.set_named_registry_value(CONFIG_CBACKS, lua.create_table()?)?;
+    // This'll allow them to register config callbacks
+    lua.globals().set("register_config", lua.create_function(|lua, c: Function| {
+        let cbacks = lua.named_registry_value::<Table>(CONFIG_CBACKS)?;
+        let len = cbacks.raw_len();
+        cbacks.raw_set(len + 1, c)
+    })?)?;
+
+    for script in &cfg.scripts {
+        lua_load(&lua, script)
+            .with_context(|_| format!("Failed to load lua script {}", script.display()))?;
+    }
+
     let mut dedup = HashSet::new();
+
     for path in &cfg.storage.search {
         let path_str = path.display();
         debug!("Looking for maildirs in {:?}", path_str);
@@ -147,6 +213,10 @@ crate fn initial_scan(cfg: &Cfg) {
                     }
                     Ok(None) => trace!("No mailbox found in {}", entry.path().display()),
                     Ok(Some(mbox)) => {
+                        let mbox = configure_mbox(&lua, mbox)
+                            .with_context(|_| {
+                                format!("Failed to configure mbox {}", entry.path().display())
+                            })?;
                         let mbox = Arc::new(mbox);
                         let name = mbox.name().to_owned();
                         assert!(MAILBOXES.lock().insert(name, Arc::clone(&mbox)).is_none());
@@ -157,4 +227,6 @@ crate fn initial_scan(cfg: &Cfg) {
             }
         }
     }
+
+    Ok(())
 }
