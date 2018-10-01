@@ -1,2 +1,4 @@
+scripts = ["mix.lua"]
 [storage]
 search = ["/home/vorner/.mutt/dir"]
+
