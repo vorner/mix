@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -105,9 +106,12 @@ impl Mailbox {
 }
 
 impl UserData for Mailbox {
-    fn add_methods(methods: &mut UserDataMethods<Self>) {
+    fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
         methods.add_method("name", |_, this, ()| Ok(this.name().to_owned()));
-        methods.add_method("path", |_, this, ()| Ok(this.path.to_string_lossy().into_owned()));
+        methods.add_method("path", |lua: &_, this, ()| {
+            let s = lua.create_string(this.path.as_os_str().as_bytes())?;
+            Ok(s)
+        });
         methods.add_method_mut("set_name", |_, this, name| {
             this.name = name;
             Ok(())
@@ -153,8 +157,8 @@ fn lua_load<P: AsRef<Path>>(lua: &Lua, script: P) -> Result<(), Error> {
     debug!("Running lua script from {}", script.as_ref().display());
     let mut f = File::open(&script)?;
     // TODO: Once lua supports non-utf8 stuff, use Vec<u8>
-    let mut code = String::new();
-    f.read_to_string(&mut code)?;
+    let mut code = Vec::new();
+    f.read_to_end(&mut code)?;
     lua.exec(&code, Some(&script.as_ref().to_string_lossy())).map_err(Error::from)
 }
 
