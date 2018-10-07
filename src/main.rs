@@ -1,4 +1,5 @@
 #![feature(crate_visibility_modifier, nll)]
+#![forbid(unsafe_code)]
 
 use failure::{Error, ResultExt};
 use log::{debug, error};
