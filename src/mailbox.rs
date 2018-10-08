@@ -7,17 +7,21 @@ use std::sync::Arc;
 
 use failure::{Error, ResultExt};
 use flate2::read::GzDecoder;
-use lazy_static::lazy_static;
 use log::{debug, error, info, trace};
+use once_cell::sync_lazy;
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use rlua::{Lua, Function, UserData, UserDataMethods, Table};
 use walkdir::{DirEntry, WalkDir};
 
-use crate::config::Cfg;
+mod mbox;
+mod mdir;
 
-lazy_static! {
-    pub(crate) static ref MAILBOXES: Mutex<HashMap<String, Arc<Mailbox>>> = Mutex::default();
-}
+use crate::config::Cfg;
+use self::mbox::Mbox;
+use self::mdir::Mdir;
+
+crate static MAILBOXES: Lazy<Mutex<HashMap<String, Arc<Mailbox>>>> = sync_lazy!(Mutex::default());
 
 const GZIP_MAGIC: &[u8] = &[0x1F, 0x8B];
 const MBOX_MAGIC: &[u8] = b"From ";
@@ -26,13 +30,13 @@ const MDIR_SUBDIRS: &[&str] = &["cur", "new", "tmp"];
 const CONFIG_CBACKS: &str = "config-cbacks";
 
 #[derive(Clone, Debug)]
-enum MboxType {
+enum Type {
     Plain,
     Gzip,
     Dir,
 }
 
-impl MboxType {
+impl Type {
     fn guess(entry: &DirEntry) -> Result<Option<Self>, Error> {
         if entry.file_type().is_file() {
             // It is a file. So try opening it and look inside.
@@ -41,7 +45,7 @@ impl MboxType {
             f.read_exact(&mut beginning)?;
             trace!("{:?} starts with {:?}", entry.path(), beginning);
             if beginning == MBOX_MAGIC {
-                return Ok(Some(MboxType::Plain));
+                return Ok(Some(Type::Plain));
             }
 
             // OK, if it's not a mailbox, it still can be a gzipped mailbox. Look if it starts with
@@ -56,7 +60,7 @@ impl MboxType {
                 gz.read_exact(&mut beginning)?;
 
                 if beginning == MBOX_MAGIC {
-                    return Ok(Some(MboxType::Gzip));
+                    return Ok(Some(Type::Gzip));
                 }
             }
         } else if entry.file_type().is_dir() {
@@ -65,7 +69,7 @@ impl MboxType {
                 .iter()
                 .all(|sub| entry.path().join(sub).is_dir());
             if is_mdir {
-                return Ok(Some(MboxType::Dir));
+                return Ok(Some(Type::Dir));
             }
         }
         Ok(None)
@@ -73,26 +77,38 @@ impl MboxType {
 }
 
 #[derive(Clone, Debug)]
+enum Cache {
+    Mbox(Mbox),
+    Mdir(Mdir),
+}
+
+#[derive(Clone, Debug)]
 crate struct Mailbox {
     path: PathBuf,
     name: String,
-    tp: MboxType,
+    tp: Type,
+    cache: Cache,
     prio: usize,
     shortcut: Option<char>,
 }
 
 impl Mailbox {
     fn detect(entry: &DirEntry) -> Result<Option<Self>, Error> {
-        if let Some(mt) = MboxType::guess(entry)? {
+        if let Some(mt) = Type::guess(entry)? {
             let name = entry
                 .path()
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "<???>".to_owned());
+            let cache = match mt {
+                Type::Gzip | Type::Plain => Cache::Mbox(Mbox::default()),
+                Type::Dir => Cache::Mdir(Mdir::default()),
+            };
             Ok(Some(Mailbox {
                 path: entry.path().to_owned(),
                 name,
                 tp: mt,
+                cache,
                 prio: 0,
                 shortcut: None,
             }))
