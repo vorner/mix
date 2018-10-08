@@ -16,10 +16,12 @@ use walkdir::{DirEntry, WalkDir};
 
 mod mbox;
 mod mdir;
+mod task;
 
 use crate::config::Cfg;
 use self::mbox::Mbox;
 use self::mdir::Mdir;
+use self::task::{Queue, Task};
 
 crate static MAILBOXES: Lazy<Mutex<HashMap<String, Arc<Mailbox>>>> = sync_lazy!(Mutex::default());
 
@@ -145,7 +147,8 @@ impl UserData for Mailbox {
 
 #[derive(Debug)]
 crate enum Notification {
-    Mailbox(Arc<Mailbox>),
+    MailboxAppeared(Arc<Mailbox>),
+    MailboxContent(Arc<Mailbox>),
 }
 
 impl Notification {
@@ -191,7 +194,7 @@ fn configure_mbox(lua: &Lua, mbox: Mailbox) -> Result<Mailbox, Error> {
     Ok(result)
 }
 
-crate fn initial_scan(cfg: &Cfg) -> Result<(), Error> {
+crate fn initial_scan(cfg: &Cfg) -> Result<Queue, Error> {
     let lua = Lua::new();
 
     trace!("Preparing configuration lua instance");
@@ -210,6 +213,7 @@ crate fn initial_scan(cfg: &Cfg) -> Result<(), Error> {
     }
 
     let mut dedup = HashSet::new();
+    let mut queue = Queue::new();
 
     for path in &cfg.storage.search {
         let path_str = path.display();
@@ -240,7 +244,8 @@ crate fn initial_scan(cfg: &Cfg) -> Result<(), Error> {
                         let mbox = Arc::new(mbox);
                         let name = mbox.name().to_owned();
                         assert!(MAILBOXES.lock().insert(name, Arc::clone(&mbox)).is_none());
-                        Notification::send(Notification::Mailbox(mbox));
+                        queue.push(Task::rescan(Arc::clone(&mbox)));
+                        Notification::send(Notification::MailboxAppeared(mbox));
                         assert!(dedup.insert(entry.into_path()));
                     }
                 }
@@ -248,5 +253,5 @@ crate fn initial_scan(cfg: &Cfg) -> Result<(), Error> {
         }
     }
 
-    Ok(())
+    Ok(queue)
 }

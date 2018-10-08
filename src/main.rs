@@ -10,8 +10,9 @@ mod mailbox;
 fn run() -> Result<(), Error> {
     let cfg = config::load()
         .context("Failed to load configuration")?;
-    mailbox::initial_scan(&cfg)?;
+    let work_queue = mailbox::initial_scan(&cfg)?;
     debug!("Mailboxes: {:?}", *mailbox::MAILBOXES.lock());
+    debug!("Initial work queue: {:?}", work_queue);
     Ok(())
 }
 

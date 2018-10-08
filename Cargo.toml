@@ -4,6 +4,12 @@ version = "0.1.0"
 authors = ["Michal 'vorner' Vaner <vorner@vorner.cz>"]
 edition = "2018"
 
+[profile.release]
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
+
 [dependencies]
 config = "~0.9"
 corona = "~0.4"
